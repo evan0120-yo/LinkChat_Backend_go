@@ -17,6 +17,7 @@ import (
 // 包含: 給 Auth 用的 UseCase (Sync), 以及給 Router 用的 Handler (API), 以及 Seeder
 type Module struct {
 	LinkUserCommandUseCase cmdUseCase.LinkUserCommandUseCase
+	LinkQueryUseCase       qryUseCase.LinkQueryUseCase
 	Handler                *handler.LinkHandler
 	Seeder                 *seeder.LinkSeeder
 }
@@ -80,6 +81,7 @@ func NewLinkModule(client *firestore.Client) *Module {
 	// 回傳 Module 結構，讓 Main 可以分別取得需要的依賴
 	return &Module{
 		LinkUserCommandUseCase: linkUserCommandUseCase,
+		LinkQueryUseCase:       linkQueryUseCase,
 		Handler:                linkHandler,
 		Seeder:                 linkSeeder,
 	}

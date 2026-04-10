@@ -12,6 +12,7 @@ import (
 
 	"github.com/evan0120-yo/linkchat-go/internal/auth"
 	"github.com/evan0120-yo/linkchat-go/internal/link"
+	"github.com/evan0120-yo/linkchat-go/internal/profile"
 
 	// 需要引入 firestore
 	"cloud.google.com/go/firestore"
@@ -59,6 +60,9 @@ func main() {
 	clearCollection(ctx, client, "users")
 	clearCollection(ctx, client, "link_users")
 	clearCollection(ctx, client, "links")
+	clearCollection(ctx, client, "subject_profiles")
+	clearCollection(ctx, client, "profile_tag_groups")
+	clearCollection(ctx, client, "profile_tags")
 
 	fmt.Println("資料庫已清空 (Drop Complete)")
 
@@ -67,6 +71,7 @@ func main() {
 	// ==========================================
 	// [修改] 這裡回傳的是 Module Struct，改名比較清楚
 	linkModule := link.NewLinkModule(client)
+	profileModule := profile.NewProfileModule(client, linkModule.LinkQueryUseCase)
 
 	// Auth 模組依賴 Link 的 CommandUseCase (用於 Sync)
 	// 注意: 這裡從 linkModule 中取出 LinkUserCommandUseCase
@@ -91,6 +96,7 @@ func main() {
 	// [註冊] Link 路由 (新增)
 	// 這會掛載 /citrus/links/search, /citrus/links/apply 等
 	linkModule.Handler.RegisterRoutes(rootGroup, authMiddleware)
+	profileModule.Handler.RegisterRoutes(rootGroup, authMiddleware)
 
 	// ==========================================
 	// 6. Seed
@@ -102,6 +108,10 @@ func main() {
 	// Link Seeder
 	if err := linkModule.Seeder.Seed(ctx); err != nil {
 		log.Fatalf("Link 資料植入失敗: %v", err)
+	}
+
+	if err := profileModule.Seeder.Seed(ctx); err != nil {
+		log.Fatalf("Profile 資料植入失敗: %v", err)
 	}
 
 	fmt.Println("Server is running at http://localhost:8082")

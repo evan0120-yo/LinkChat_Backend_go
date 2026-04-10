@@ -3,18 +3,19 @@
 ## 範圍與來源
 
 - 本文件描述 LinkChat\Backend\Go\LinkChat 目前已落地的 Go backend 設計。
-- 來源以目前程式碼為準，特別是 cmd/api/main.go、internal/auth、internal/link。
-- 本文件不把 PLAN.md 中的 traits、profile、copilot integration、AI pipeline 當成已實作能力。
+- 來源以目前程式碼為準，特別是 cmd/api/main.go、internal/auth、internal/link、internal/profile。
+- 本文件不把 PLAN.md 中的 copilot integration、InternalAICopliot 呼叫、AI pipeline 當成已實作能力。
 - LinkChat\Backend\Java\LinkChat 不在本文件範圍內。
 
 ## 1. 系統摘要
 
 LinkChat 目前實際上是一個偏開發驗證用途的 Go backend。
 
-已落地的核心只有兩個業務模組：
+已落地的核心有三個業務模組：
 
 - auth
 - link
+- profile
 
 目前對外可用能力是：
 
@@ -25,11 +26,14 @@ LinkChat 目前實際上是一個偏開發驗證用途的 Go backend。
 - 搜尋使用者
 - 好友申請、接受、拒絕、取消、解除
 - 好友列表查詢
+- 人物補充三句保存
+- 人物 tag 保存
+- 人物背景資料查詢
+- tag catalog 查詢
 - 驗證測試路由
 
 目前沒有落地的能力：
 
-- traits / profile
 - copilot integration
 - InternalAICopliot 呼叫
 - AI 分析入口
@@ -54,8 +58,18 @@ main
 │  users
 │  link_users
 │  links
+│  subject_profiles
+│  profile_tag_groups
+│  profile_tags
 │
 ├─ 建立 Link module
+│  ├─ repository
+│  ├─ service
+│  ├─ usecase
+│  ├─ seeder
+│  └─ handler
+│
+├─ 建立 Profile module
 │  ├─ repository
 │  ├─ service
 │  ├─ usecase
@@ -70,6 +84,8 @@ main
 ├─ 執行 AuthSeeder
 │
 ├─ 執行 LinkSeeder
+│
+├─ 執行 ProfileSeeder
 │
 └─ Gin listen :8082
 ```
@@ -160,11 +176,62 @@ repository
 └─ links collection
 ```
 
-### 3.3 模組依賴方向
+### 3.3 profile 模組
+
+關鍵檔案
+
+- internal/profile/provider.go (line 17)
+- internal/profile/handler/profile_handler.go (line 14)
+- internal/profile/usecase/command/profile_usecase.go (line 17)
+- internal/profile/usecase/query/profile_usecase.go (line 12)
+
+profile 模組負責：
+
+- 保存 owner 對 linked subject 的人物補充三句
+- 保存 owner 對 linked subject 的 tag 選擇
+- 提供 tag catalog 查詢
+- 提供 subject profile context 查詢
+
+profile 分層責任：
+
+```text
+handler
+└─ 取 token 內 userID，做 request binding 與 HTTP response mapping
+
+usecase/command
+├─ 檢查 subject 是否為 active linked user
+├─ notes / tags normalization
+├─ 讀取既有 subject profile
+├─ merge 另一半既有資料
+└─ 決定 upsert 或 delete
+
+usecase/query
+├─ 讀取 subject profile context
+└─ 讀取 active tag catalog
+
+service
+├─ command: 寫入 / 刪除 subject profile
+├─ query: 查 subject profile 與 tag catalog
+└─ validator: notes / tags deterministic rule
+
+repository
+├─ subject_profiles collection
+├─ profile_tag_groups collection
+└─ profile_tags collection
+```
+
+這個模組有一個很明確的第一版限制：
+
+- `subjectId` 必須對應目前 active 的 linked user
+- profile 模組透過 `link usecase/query` 驗證這個 access rule
+
+### 3.4 模組依賴方向
 
 ```text
 main
 ├─ link module
+├─ profile module
+│  └─ 依賴 link.LinkQueryUseCase
 └─ auth module
    └─ 依賴 link.LinkUserCommandUseCase
 
@@ -201,6 +268,10 @@ auth.delete
 | POST | /citrus/links/remove | 是 | 解除好友 |
 | POST | /citrus/links/cancel | 是 | 取消申請 |
 | GET | /citrus/links/list | 是 | 好友列表 |
+| PUT | /citrus/profiles/notes | 是 | 保存人物補充三句 |
+| PUT | /citrus/profiles/tags | 是 | 保存人物 tag |
+| GET | /citrus/profiles/context | 是 | 查詢人物背景資料 |
+| GET | /citrus/profiles/tag-catalog | 是 | 查詢可用 tag catalog |
 
 ### 4.2 Request admission
 
@@ -224,9 +295,13 @@ auth.delete
 - internal/auth/model/user.go (line 5)
 - internal/link/model/link_user.go (line 5)
 - internal/link/model/link.go (line 13)
+- internal/profile/model/subject_profile.go (line 5)
+- internal/profile/model/tag_catalog.go (line 9)
 - internal/auth/repository/user_repository.go (line 45)
 - internal/link/repository/link_user_repository.go (line 40)
 - internal/link/repository/link_repository.go (line 44)
+- internal/profile/repository/subject_profile_repository.go (line 13)
+- internal/profile/repository/tag_catalog_repository.go (line 13)
 
 ### 5.1 users
 
@@ -278,6 +353,54 @@ auth.delete
 - 關係刪除使用 hard delete
 - rejected 狀態會留在資料庫
 - blocked 常數存在，但目前沒有任何 API 寫入 blocked
+
+### 5.4 subject_profiles
+
+| 欄位 | 型別 | 用途 |
+| --- | --- | --- |
+| id | string | `ownerID__subjectID` 組成的主鍵 |
+| owner_id | string | 維護這份人物資料的 LinkChat 使用者 |
+| subject_id | string | 被維護的人物對象 |
+| note_lines | []string | 最多三條補充短句 |
+| selected_tags | []object | canonical `groupKey/tagKey` 組合 |
+| updated_at | time | 最近更新時間 |
+
+設計說明：
+
+- 第一版 subject profile 只允許綁定 active linked user
+- notes 與 tags 共用同一份文件，避免跨 collection merge
+- 當 note_lines 與 selected_tags 都為空時，會直接刪除文件
+
+### 5.5 profile_tag_groups
+
+| 欄位 | 型別 | 用途 |
+| --- | --- | --- |
+| group_key | string | 穩定 group key |
+| label | string | LinkChat UI 顯示名稱 |
+| selection_mode | string | `single` 或 `multi` |
+| active | bool | 是否可被選用 |
+| order_no | int | UI 排序 |
+
+設計說明：
+
+- group 定義目前由 seeder 植入
+- selection_mode 是 validator 的單選 / 多選規則來源
+
+### 5.6 profile_tags
+
+| 欄位 | 型別 | 用途 |
+| --- | --- | --- |
+| id | string | `groupKey__tagKey` 主鍵 |
+| group_key | string | 所屬 tag group |
+| tag_key | string | 穩定 tag key |
+| label | string | LinkChat UI 顯示名稱 |
+| active | bool | 是否可被選用 |
+| order_no | int | UI 排序 |
+
+設計說明：
+
+- 保存時只寫 canonical `groupKey/tagKey` 到 subject profile
+- label 只保留在 catalog，不進 subject profile 持久化
 
 ## 6. 核心流程設計
 
@@ -429,6 +552,61 @@ GET /citrus/links/list
 - 批次查詢 FindByIDs 不過濾 is_active
 - 因此 inactive 使用者若仍有 links，還是可能進列表
 
+### 6.6 人物補充三句與 tag 保存流程
+
+關鍵檔案
+
+- internal/profile/handler/profile_handler.go (line 29)
+- internal/profile/usecase/command/profile_usecase.go (line 31)
+- internal/profile/service/validator/profile_validator.go (line 17)
+
+```text
+PUT /citrus/profiles/notes or /citrus/profiles/tags
+│
+├─ middleware 驗證 token
+├─ handler 取 ownerID 與 request body
+├─ usecase 透過 link query usecase 檢查 subject 是否為 active linked user
+├─ validator
+│  ├─ notes: trim、移除空字串、限制最多三條、每條最多 60 字
+│  └─ tags: canonicalize key、檢查 active catalog、處理 dedupe、檢查 single/multi
+├─ 讀取現有 subject_profiles
+├─ merge 另一半既有資料
+├─ notes + tags 若都空
+│  └─ delete subject_profiles
+└─ 否則 upsert subject_profiles
+```
+
+目前固定行為：
+
+- `subjectId` 不可等於 owner 自己
+- `subjectId` 若不是 active linked user，保存會直接失敗
+- notes 與 tags 分開保存，但共用同一份 `subject_profiles` 文件
+
+### 6.7 人物背景與 tag catalog 查詢流程
+
+關鍵檔案
+
+- internal/profile/handler/profile_handler.go (line 84)
+- internal/profile/usecase/query/profile_usecase.go (line 23)
+- internal/profile/repository/tag_catalog_repository.go (line 44)
+
+```text
+GET /citrus/profiles/context
+│
+├─ middleware 驗證 token
+├─ usecase 檢查 subject 是否為 active linked user
+└─ 讀取 owner__subject 對應的 subject_profiles
+
+GET /citrus/profiles/tag-catalog
+│
+└─ 讀取 active 的 profile_tag_groups / profile_tags，按 group 組裝回傳
+```
+
+目前固定行為：
+
+- 沒有 subject profile 文件時，`/context` 回空資料結構，不視為錯誤
+- `/tag-catalog` 只回 active group 與 active tags
+
 ## 7. 安全設計
 
 ### 7.1 JWT
@@ -503,11 +681,11 @@ blocked
 ## 9. 已知限制與未實作項
 
 - 啟動流程會清空資料，不適合正式環境。
-- README / PLAN 提到的 AI 入口、traits、copilot integration 都還沒進 code。
+- README / PLAN 提到的 copilot integration、InternalAICopliot 呼叫都還沒進 code。
 - login 不檢查 is_active，停用帳號仍可登入。
 - 刪除帳號不會清 links，只會把 users 與 link_users 標 inactive。
 - 非管理員刪除別人時，錯誤最後回 500，不是 403。
 - rejected 關係會阻止重新申請。
 - blocked 狀態存在於模型，但沒有 API 寫入它。
 - 預設 seed 的 System Admin 仍會被註冊成 user。
-- 專案目前沒有 *_test.go，只有執行期 seed 與手動測試路由。
+- 目前 `profile` 模組只有 validator / command usecase 的 unit test，其他流程仍主要靠手動驗證。

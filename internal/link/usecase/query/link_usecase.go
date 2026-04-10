@@ -15,6 +15,7 @@ type LinkQueryUseCase interface {
 	SearchUsers(ctx context.Context, keyword string) ([]*model.LinkUser, error)
 	// GetLinkList 取得好友列表 (包含篩選與排序)
 	GetLinkList(ctx context.Context, userID string, filter req.ListLinkReq) ([]*resp.LinkItemResp, error)
+	GetLinkedSubject(ctx context.Context, ownerID, subjectID string) (*model.LinkUser, error)
 }
 
 type linkQueryUseCase struct {
@@ -34,6 +35,30 @@ func NewLinkQueryUseCase(
 
 func (uc *linkQueryUseCase) SearchUsers(ctx context.Context, keyword string) ([]*model.LinkUser, error) {
 	return uc.userQueryService.SearchUsers(ctx, keyword)
+}
+
+func (uc *linkQueryUseCase) GetLinkedSubject(ctx context.Context, ownerID, subjectID string) (*model.LinkUser, error) {
+	if ownerID == "" || subjectID == "" || ownerID == subjectID {
+		return nil, nil
+	}
+
+	link, err := uc.linkQueryService.GetLinkByParticipants(ctx, ownerID, subjectID)
+	if err != nil {
+		return nil, err
+	}
+	if link == nil || link.Status != model.StatusActive {
+		return nil, nil
+	}
+
+	subject, err := uc.userQueryService.GetLinkUserByID(ctx, subjectID)
+	if err != nil {
+		return nil, err
+	}
+	if subject == nil || !subject.IsActive {
+		return nil, nil
+	}
+
+	return subject, nil
 }
 
 // GetLinkList 取得好友列表 (核心邏輯)

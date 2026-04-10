@@ -4,53 +4,79 @@
 
 - 本文件只描述 LinkChat\Backend\Go\LinkChat 目前實際落地的 Go backend。
 - 來源優先順序是 current code -> runtime wiring -> 既有文件。
+- 這份文件是 current implementation walkthrough，不是 BDD / SDD / PLAN。
 - LinkChat\Backend\Java\LinkChat 不在這份 CODE_REVIEW 範圍內。
 
 ## BLOCK 1: AI 對產品的想像
 
-從現在這份 code 看，LinkChat 還不是一個已經長成的 AI 軍師產品，比較像是一個拿來打底的後端骨架。
+從現在這份 code 看，LinkChat 已經不是只有 auth 與好友關係的底座了。它現在更像一個「先把人物背景資料整理好、之後再接 AI」的 Go backend。
 
-它現在真的有的，是帳號、JWT、聯絡人搜尋、好友關係與一些驗證測試路由。它看起來像是在為後續更大的 AI 分析產品暖機，但 AI 本體目前還沒接上。README、PLAN、ARCHITECTURE 講的 traits、copilot integration、InternalAICopliot 邊界，還停在規劃層，不在 runtime。
+目前已經落地的有三塊：
 
-我的推測是，這個專案現在比較像個小規模、開發者自用的 backend playground。啟動時會直接清空 emulator 資料再重灌 seed，這種做法很明顯不是給正式環境用，而是為了快速重跑 auth/link 流程。
+- 帳號與 JWT
+- 搜尋與好友關係
+- 人物背景資料
 
-它不是什麼：
+第三塊的人物背景資料，就是這次新長出來的 profile 模組。它讓使用者可以對某個已連結的人保存補充三句、tag 選擇、查詢 tag catalog，並把這些資料整理成之後 AI 分析會需要的 context。
+
+如果用一句話總結現在的產品形狀，大概會是這樣：
+
+```text
+現在是 auth + link + profile 的 Go backend
+│
+├─ 已落地
+│  ├─ 帳號 / JWT
+│  ├─ 搜尋與好友關係
+│  └─ 人物背景資料（notes / tags / catalog / context）
+│
+└─ 未落地
+   ├─ copilot integration
+   ├─ InternalAICopliot client
+   └─ AI 分析入口
+```
+
+它現在不是什麼：
 
 - 不是 production-ready 服務
-- 不是已接好 AI 分析入口的產品
+- 不是已經接好 AI 分析入口的產品
 - 不是完整社交平台
-- 不是有完整權限模型與測試覆蓋的成熟後端
+- 不是擁有完整自動化測試覆蓋的成熟後端
+
+profile 落地後，這個專案的定位比以前清楚很多。以前它比較像只有「人怎麼進來、彼此怎麼連上」的 backend playground；現在它已經開始保存 AI 會需要的人物背景資料，只是還沒把 LinkChat -> InternalAICopliot 這條線真的接上。
 
 ## BLOCK 2: 讀者模式
 
 ### 1. 這個系統現在實際是什麼
 
-它現在實際上是一個只落地了 auth 與 link 的 Gin + Firestore emulator backend。
+它現在實際上是一個 Gin + Firestore emulator backend，核心模組是 auth、link、profile 三塊。
 
-你可以把它理解成：先把「人怎麼進來、彼此怎麼建立關係」這兩件事做起來，後面再看要不要把 AI 功能接上去。整體的執行起點非常直接，沒有太多基礎設施抽象。
+你可以把它理解成：先把「登入」、「聯絡人關係」、「人物背景資料」都固定下來，等這些資料邊界穩定後，再往 AI 分析入口延伸。整體 runtime 仍然很偏開發驗證用途，不是正式環境。
 
 ```text
 啟動 main
 │
 ├─ 連 Firestore emulator
-├─ 把 users / link_users / links 清空
+├─ 清 users / link_users / links
+├─ 清 subject_profiles / profile_tag_groups / profile_tags
 ├─ 組 Link module
+├─ 組 Profile module
 ├─ 組 Auth module
 ├─ 註冊 /citrus 路由
 ├─ 跑 auth seed
 ├─ 跑 link seed
+├─ 跑 profile seed
 └─ listen :8082
 ```
 
-> 注意: 每次啟動都會清空三個集合，所以這份 code 的預設心智模型是「開發環境重跑流程」，不是「保存既有資料」。
+> 注意: 每次啟動都會清空 6 個集合，所以預設心智模型仍然是「開發時重跑流程」，不是保留既有資料。
 
-> 注意: 文件裡提到的 AI pipeline、traits/profile、copilot integration，現在都沒有對應模組與 API。
+> 注意: 系統現在已經不只 auth/link，profile 也在 runtime 裡了；但 AI 呼叫、copilot integration、InternalAICopliot client 仍未接上。
 
 ### 2. 帳號與登入
 
-這塊做的事情很單純：註冊、登入、刪除帳號，以及兩個測試用的受保護 API。
+這塊做的事情和之前差不多，仍然是註冊、登入、刪除帳號，以及幾條測試路由。
 
-註冊時，系統不只是建一個 users 文件，還會順手幫 link 模組建一份 link_users projection，讓之後搜尋人與建立好友關係可以直接用。這個同步不是靠 MQ 或 event，而是直接包在同一個 Firestore transaction 裡做掉。
+註冊時，系統不只會建一份 users 文件，還會順手幫 link 模組建立 link_users projection。這代表 auth 仍然是帳號真實來源，而 link_users 只是給搜尋與關係資料用的 projection。
 
 ```text
 註冊
@@ -63,9 +89,9 @@
    └─ 建 link_users
 ```
 
-登入流程也很直接：查 email、驗密碼、簽 token。這裡沒有額外的帳號狀態檢查，也沒有 refresh token、session、blacklist 之類的配套。
+登入流程也維持很單純：查 email、驗密碼、簽 token。沒有 refresh token、沒有 session、沒有 blacklist。
 
-刪除帳號不是 hard delete。現在的做法是把 users.is_active 與 link_users.is_active 都改成 false，等於告訴系統「這個人不要再當活人用」，但舊的 links 關係資料會留下來。
+刪除帳號仍然不是 hard delete，而是把 users.is_active 與 link_users.is_active 改成 false。links 不會被清，所以舊關係資料仍會留在系統裡。
 
 ```text
 刪除帳號
@@ -80,17 +106,15 @@
 
 > 注意: 註冊時 role 一律寫成 user，所以 seed 裡雖然有一個叫 System Admin 的帳號，實際上也只是 user。
 
-> 注意: login 沒有檢查 is_active，所以被刪成 inactive 的帳號，現在只要密碼對，還是能登入拿 token。
+> 注意: login 現在沒有檢查 users.is_active，所以被停用的帳號只要密碼對，還是能登入拿 token。
 
-> 注意: /citrus/auth/delete 的權限錯誤最後會被 handler 回成 500，不是比較合理的 403。
+> 注意: /citrus/auth/delete 的權限錯誤最後仍會被 handler 回成 500，不是比較合理的 403。
 
 ### 3. 搜尋與好友關係
 
-link 模組現在最像一個「簡化版關係系統」。它不是聊天，也不是推薦，而是提供搜尋對象、送出申請、接受/拒絕/取消/解除這些基礎動作。
+link 模組現在仍是簡化版關係系統。它負責搜尋人、送出申請、接受、拒絕、取消、解除這些基礎動作。
 
-搜尋是 prefix search，只搜 active 的 link_users，最多回 20 筆。這份資料不是直接查 auth users，而是查 auth 同步過來的 projection。
-
-好友申請的核心邏輯是：不能加自己、不能加不存在或 inactive 的人、兩人之間不能已經有任何 link 文件。通過之後才會寫一筆 pending link。
+搜尋是 prefix search，只搜 active 的 link_users，最多回 20 筆。好友申請的核心邏輯也沒變：不能加自己、不能加不存在或 inactive 的人、兩人之間不能已經有任何 link 文件。通過之後才會寫一筆 pending link。
 
 ```text
 ApplyLink
@@ -104,7 +128,7 @@ ApplyLink
 └─ 回傳新 link
 ```
 
-接受、拒絕、取消、解除則是把操作權限與狀態限制切得很明確：
+接受、拒絕、取消、解除的規則也一樣切得很硬：
 
 ```text
 pending
@@ -116,63 +140,162 @@ active
 └─ 任一 participant remove -> hard delete
 ```
 
-> 注意: 這裡的「不能重複申請」是很硬的。只要兩人之間已有任何 link 文件，包含 rejected，後續都不能再 Apply。
+這次對 link 模組最重要的新變化，不是多了新關係 API，而是多了一個給 profile 模組用的查詢入口。profile 不會直接去碰 link repository 或 link service，它是透過 link usecase/query 驗證「這個 subject 是不是目前 active 的 linked user」。
+
+用產品語言講，意思就是：
+
+- 人物背景資料不是隨便對任何人都能寫
+- 你只能對目前真的已連結、而且還活著的對象寫這些資料
+
+> 注意: 只要兩人之間已有任意 link 文件，包含 rejected，後續都不能再 Apply。
 
 > 注意: blocked 狀態雖然存在於 model，但目前沒有任何 API 會把 link 寫成 blocked。
 
-### 4. 好友列表與狀態流轉
+### 4. 人物補充三句與 tag
 
-好友列表不是直接把 links 原封不動吐出去，而是會做一次「把資料變成人比較能看的列表項目」的組裝。
+這是這次實作新增的主體。profile 模組現在已經能保存「某個 owner 對某個 linked subject 的人物背景資料」。
 
-流程是先把與我有關的 links 都撈出來，再找每一筆關係中的「對方」是誰，批次去查 link_users，把名字補上，最後再把 pending 轉成 pending_sent 或 pending_received，並加上 direction。
+對外有兩條寫入 API：
+
+- PUT /citrus/profiles/notes
+- PUT /citrus/profiles/tags
+
+這兩條 API 的 request 都會帶 subjectId，但邏輯邊界不同：notes 專門處理補充三句，tags 專門處理 tag 選擇。兩邊分開保存，但最後都會 merge 回同一份 subject_profiles 文件。
+
+#### 補充三句
+
+notes 的邏輯很明確：
+
+- body 帶 subjectId、lines
+- 每條會先 trim
+- trim 後空字串直接移除
+- 最多只能留 3 條非空短句
+- 每條上限 60 字
+- 保留原本順序
+- 不會自動改寫、摘要、翻譯或合併
 
 ```text
-GetLinkList
+保存 notes
 │
-├─ 先撈我的所有 links
-├─ 收集每筆的 otherID
-├─ 批次查 link_users
-├─ 轉換狀態
-│  ├─ pending + 我是 requester -> pending_sent
-│  ├─ pending + 我是 target    -> pending_received
-│  ├─ active                  -> active
-│  └─ rejected                -> rejected
-├─ 套 filter
-└─ 排序
-   ├─ active
-   ├─ pending_received
-   ├─ pending_sent
-   └─ rejected
+├─ 驗證 owner 與 subject 是否可編輯
+├─ trim / 移除空字串
+├─ 檢查最多 3 條
+├─ 檢查每條最多 60 字
+├─ 讀既有 subject profile
+├─ 保留既有 tags
+└─ upsert 或 delete
 ```
 
-這裡有兩個產品層面很值得注意的點。第一，預設 all 列表會隱藏 blocked，但 rejected 會留著。第二，批次查 link_users 的那條路沒有再過濾 is_active，所以如果某個人被刪成 inactive，但舊 link 還在，他還是可能出現在列表裡。
+#### tag
 
-狀態流轉可以整理成下面這樣：
+tags 的邏輯也很結構化：
+
+- body 帶 subjectId、selected
+- tag 走 canonical groupKey/tagKey
+- 會做 trim + lowercase normalization
+- 不存在或 inactive 的 group/tag 會直接失敗
+- single group 只能選一個
+- multi group 可以多個
+- 重複 tag 只會留一份
 
 ```text
-pending
-├─ accept by target
-│  └─ active
-├─ reject by target
-│  └─ rejected
-└─ cancel by requester
-   └─ deleted
-
-active
-└─ remove by participant
-   └─ deleted
-
-blocked
-└─ 目前沒有落地寫入路徑
+保存 tags
+│
+├─ 驗證 owner 與 subject 是否可編輯
+├─ 讀 active tag catalog
+├─ 檢查 group / tag 是否存在
+├─ 檢查 single / multi 規則
+├─ dedupe 重複 tag
+├─ 讀既有 subject profile
+├─ 保留既有 notes
+└─ upsert 或 delete
 ```
 
-> 注意: DeleteUser 不會清 links，所以「inactive user 還留在好友列表裡」不是理論上的可能，而是現在資料模型自然會發生的結果。
+#### merge 與 delete 行為
 
-### 5. 測試資料與成熟度
+這兩條 API 有一個很重要的資料行為：它們雖然分開保存，但不是各存一份資料。
 
-這個專案現在的驗證方式很偏手動。它有 seeder，也有 /citrus/test/ping、/citrus/test/profile、/citrus/test/system 這些測試路由，但沒有真正的 test file。
+- 保存 notes 時，既有 tags 要保留
+- 保存 tags 時，既有 notes 要保留
+- 如果 notes + tags 最後都空，系統會直接刪掉 subject_profiles 文件
 
-auth seeder 會透過正式的 Register usecase 建三個帳號；link seeder 再去找 Normal User 與 EvanHe，替他們建一筆 pending 關係。這種 seed 方式的好處是能順手驗證用例流程，壞處是 seed 會一起繼承目前實作的限制。
+#### access rule
+
+這塊的限制非常明確：
+
+- owner 不能把自己當成 subject
+- subjectId 必須是 active linked user
+
+也就是說，profile 模組保存的不是任意人物資料，而是「目前這個使用者已連結對象的人物背景資料」。
+
+> 注意: 這裡的 tag label 只存在 catalog 與 response，不會被寫進 subject_profiles 當成主要資料。
+
+> 注意: 這些資料目前只是本地保存與查詢，還沒有被真正送進 InternalAICopliot 的 AI consult flow。
+
+### 5. 人物背景資料與 tag catalog 查詢
+
+除了寫入之外，profile 模組現在也能把資料查回來。
+
+對外有兩條查詢 API：
+
+- GET /citrus/profiles/context?subjectId=...
+- GET /citrus/profiles/tag-catalog
+
+#### context 查詢
+
+這條 API 會先做和寫入一樣的 access rule 檢查，也就是 subject 必須是 active linked user。通過後，系統會用 ownerID__subjectID 去找 subject_profiles。
+
+如果找不到文件，不會當成錯誤，而是回一個空資料結構。這代表前端可以直接拿來畫初始狀態，不需要把「還沒建立人物資料」當 exception flow。
+
+```text
+查 profile context
+│
+├─ 驗證 owner 與 subject 是否可讀
+├─ 用 ownerID__subjectID 查 subject_profiles
+└─ 找不到就回空結構
+```
+
+#### tag catalog 查詢
+
+這條 API 回的是目前 active 的 group 與 active 的 tags，而且已經按 group 組好了。它的角色比較像 UI catalog，不是 prompt source。
+
+```text
+查 tag catalog
+│
+├─ 讀 active groups
+├─ 讀 active tags
+├─ 依 group 組裝
+└─ 回傳給前端選擇
+```
+
+前端應把這份資料理解成：
+
+- 這是「現在可以選哪些 tag」的 UI 資料
+- 不是 Internal prompt fragment
+- 不是 AI 理論 mapping
+
+> 注意: /context 沒文件時是 200 + 空資料，不是 404。
+
+> 注意: /tag-catalog 只回 active groups / active tags，已 inactive 的資料不會出現在前端選單。
+
+### 6. 測試資料與成熟度
+
+這個專案現在的驗證方式仍然偏手動，但已經不再是「完全沒有 test file」的狀態。
+
+目前它有三種驗證手段：
+
+- auth seeder
+- link seeder
+- profile seeder
+
+外加：
+
+- /citrus/test/ping
+- /citrus/test/profile
+- /citrus/test/system
+- profile 模組的 unit tests
+
+auth seeder 仍然透過正式的 Register usecase 建帳號；link seeder 會幫 Normal User 與 EvanHe 建一筆 pending 關係；profile seeder 則會植入 persona tag catalog。
 
 ```text
 AuthSeeder
@@ -184,11 +307,17 @@ LinkSeeder
 ├─ 用名字找 Normal User
 ├─ 用名字找 EvanHe
 └─ ApplyLink: Normal User -> EvanHe
+
+ProfileSeeder
+├─ 植入 profile_tag_groups
+└─ 植入 profile_tags
 ```
 
-> 注意: 因為 Register 一律把 role 寫成 user，預設 seed 並不會真的產生 admin，所以 /citrus/test/system 這條 admin-only 路由，預設狀態下其實打不通。
+自動化測試目前只補在 profile 模組，覆蓋的是 deterministic rule 與 command usecase 的核心合併行為，不是整個系統都已有完整回歸保護。
 
-> 注意: 目前沒有 *_test.go。這個專案更像「能跑起來、能手動驗流程」，而不是「已有自動化回歸保護」。
+> 注意: 專案大部分模組仍然偏手動驗證；目前有單元測試的主要是 profile validator 與 profile command usecase。
+
+> 注意: 整個專案的預設心智模型仍然是 emulator-first 開發，而不是正式環境 rollout。
 
 ## BLOCK 3: 技術補充
 
@@ -196,29 +325,36 @@ LinkSeeder
 
 關鍵檔案
 
-- cmd/api/main.go (line 38)
-- internal/link/provider.go (line 25)
-- internal/auth/provider.go (line 23)
+- cmd/api/main.go (line 39)
+- internal/link/provider.go (line 13)
+- internal/profile/provider.go (line 17)
+- internal/auth/provider.go (line 17)
 
 啟動與 wiring：
 
 ```text
 cmd/api/main.go
 │
-├─ clearCollection("users")      line 59
-├─ clearCollection("link_users") line 60
-├─ clearCollection("links")      line 61
+├─ clearCollection("users")              line 60
+├─ clearCollection("link_users")         line 61
+├─ clearCollection("links")              line 62
+├─ clearCollection("subject_profiles")   line 63
+├─ clearCollection("profile_tag_groups") line 64
+├─ clearCollection("profile_tags")       line 65
 │
-├─ link.NewLinkModule(client)                                  line 69
-├─ auth.NewAuthModule(client, linkModule.LinkUserCommandUseCase) line 73
+├─ link.NewLinkModule(client)                                     line 73
+├─ profile.NewProfileModule(client, linkModule.LinkQueryUseCase)  line 74
+├─ auth.NewAuthModule(client, linkModule.LinkUserCommandUseCase)  line 78
 │
-├─ authHandler.RegisterRoutes(rootGroup, authMiddleware)       line 88
-├─ testHandler.RegisterRoutes(rootGroup, authMiddleware)       line 89
-├─ linkModule.Handler.RegisterRoutes(rootGroup, authMiddleware) line 93
+├─ authHandler.RegisterRoutes(rootGroup, authMiddleware)          line 93
+├─ testHandler.RegisterRoutes(rootGroup, authMiddleware)          line 94
+├─ linkModule.Handler.RegisterRoutes(rootGroup, authMiddleware)   line 98
+├─ profileModule.Handler.RegisterRoutes(rootGroup, authMiddleware) line 99
 │
-├─ authSeeder.Seed(ctx)                                        line 98
-├─ linkModule.Seeder.Seed(ctx)                                 line 103
-└─ r.Run(":8082")                                              line 108
+├─ authSeeder.Seed(ctx)                                           line 104
+├─ linkModule.Seeder.Seed(ctx)                                    line 109
+├─ profileModule.Seeder.Seed(ctx)                                 line 113
+└─ r.Run(":8082")                                                 line 118
 ```
 
 實際對外路由總表：
@@ -239,10 +375,19 @@ cmd/api/main.go
 | POST | /citrus/links/remove | internal/link/handler/link_handler.go |
 | POST | /citrus/links/cancel | internal/link/handler/link_handler.go |
 | GET | /citrus/links/list | internal/link/handler/link_handler.go |
+| PUT | /citrus/profiles/notes | internal/profile/handler/profile_handler.go |
+| PUT | /citrus/profiles/tags | internal/profile/handler/profile_handler.go |
+| GET | /citrus/profiles/context | internal/profile/handler/profile_handler.go |
+| GET | /citrus/profiles/tag-catalog | internal/profile/handler/profile_handler.go |
+
+目前已接上的模組：
+
+- auth
+- link
+- profile
 
 目前未接上的模組：
 
-- traits / profile
 - copilot integration
 - InternalAICopliot client
 - AI request contract
@@ -345,12 +490,13 @@ Auth / Test API 錯誤映射：
 
 關鍵檔案
 
-- internal/link/handler/link_handler.go (line 70)
-- internal/link/usecase/command/link_usecase.go (line 51)
-- internal/link/service/command/link_service.go (line 43)
-- internal/link/service/validator/link_validator.go (line 17)
-- internal/link/repository/link_repository.go (line 89)
-- internal/link/repository/link_user_repository.go (line 141)
+- internal/link/handler/link_handler.go (line 29)
+- internal/link/usecase/command/link_usecase.go (line 27)
+- internal/link/usecase/query/link_usecase.go (line 14)
+- internal/link/service/command/link_service.go (line 18)
+- internal/link/service/validator/link_validator.go (line 9)
+- internal/link/repository/link_repository.go (line 11)
+- internal/link/repository/link_user_repository.go (line 11)
 
 SearchUsers call chain：
 
@@ -417,114 +563,375 @@ POST /citrus/links/remove
 | cancel | requester | pending | hard delete |
 | remove | 任一 participant | active | hard delete |
 
+Link query 補充：
+
+```text
+LinkQueryUseCase.GetLinkedSubject
+│
+├─ owner / subject 不可空，且不可相同
+├─ 用 GetLinkByParticipants 檢查兩人是否有 active link
+├─ 用 GetLinkUserByID 檢查 subject 是否 active
+└─ 成功才回 subject
+```
+
+這條 query 是 profile 模組 access rule 的入口，不是直接讓 profile 去碰 link repository。
+
 關係 API 錯誤映射：
 
 | API | 條件 | HTTP status |
 | --- | --- | --- |
-| /links/search | token 無效 | 401 |
-| /links/search | JSON binding 失敗 | 400 |
-| /links/search | repository / query 錯誤 | 500 |
-| /links/apply | token 無效 | 401 |
-| /links/apply | 自己加自己、target 不存在、已有 link | 400 |
-| /links/accept | 非 target 或非 pending | 400 |
-| /links/reject | 非 target 或非 pending | 400 |
-| /links/cancel | 非 requester 或非 pending | 400 |
-| /links/remove | 非 participant 或非 active | 400 |
+| POST /links/search | JSON binding 失敗 | 400 |
+| POST /links/search | query service error | 500 |
+| POST /links/apply | token 無效或缺失 | 401 |
+| POST /links/apply | target 不存在、重複申請、自加自己 | 400 |
+| POST /links/accept | token 無效或缺失 | 401 |
+| POST /links/accept | 非 target、狀態錯誤、link 不存在 | 400 |
+| POST /links/reject | token 無效或缺失 | 401 |
+| POST /links/reject | 非 target、狀態錯誤、link 不存在 | 400 |
+| POST /links/cancel | token 無效或缺失 | 401 |
+| POST /links/cancel | 非 requester、狀態錯誤、link 不存在 | 400 |
+| POST /links/remove | token 無效或缺失 | 401 |
+| POST /links/remove | 非 participant、狀態錯誤、link 不存在 | 400 |
+| GET /links/list | token 無效或缺失 | 401 |
+| GET /links/list | query usecase error | 500 |
 
-目前實作限制：
-
-- FindLinkByParticipants 只要找到任何一筆該兩人參與的 link 就算重複，不區分 rejected / active / pending。
-- blocked 只存在常數，沒有對應 usecase。
-
-### 4. 好友列表與狀態流轉
+### 4. 人物補充三句與 tag
 
 關鍵檔案
 
-- internal/link/handler/link_handler.go (line 241)
-- internal/link/usecase/query/link_usecase.go (line 39)
-- internal/link/repository/link_repository.go (line 113)
-- internal/link/repository/link_user_repository.go (line 86)
-- internal/link/object/resp/link_item_resp.go (line 3)
+- internal/profile/handler/profile_handler.go (line 29)
+- internal/profile/usecase/common.go (line 13)
+- internal/profile/usecase/command/profile_usecase.go (line 31)
+- internal/profile/service/validator/profile_validator.go (line 17)
+- internal/profile/repository/subject_profile_repository.go (line 13)
+- internal/profile/repository/tag_catalog_repository.go (line 13)
 
-列表組裝細節：
+Profile module wiring：
 
 ```text
-GET /citrus/links/list
+internal/profile/provider.go
+│
+├─ NewSubjectProfileRepository(client)       line 26
+├─ NewTagCatalogRepository(client)           line 27
+├─ NewSubjectProfileCommandService(...)      line 29
+├─ NewSubjectProfileQueryService(...)        line 30
+├─ NewTagCatalogQueryService(...)            line 31
+├─ NewProfileValidator()                     line 32
+├─ NewProfileCommandUseCase(...)             line 34
+└─ NewProfileQueryUseCase(...)               line 41
+```
+
+保存 notes call chain：
+
+```text
+PUT /citrus/profiles/notes
 -> VerifyToken middleware
--> LinkHandler.GetLinkList
--> LinkQueryUseCase.GetLinkList
-   -> LinkQueryService.GetLinksByUserID
-      -> LinkRepository.FindLinksByUserID
-   -> LinkUserQueryService.GetLinkUsersByIDs
-      -> LinkUserRepository.FindByIDs
-   -> usecase 內做：
-      1. otherID 推導
-      2. userMap 組裝
-      3. status 轉換
-      4. filter 套用
-      5. memory sort
+-> ProfileHandler.SaveSubjectNotes
+-> ProfileCommandUseCase.SaveSubjectNotes
+   -> EnsureAccessibleSubject
+      -> LinkQueryUseCase.GetLinkedSubject
+   -> ProfileValidator.NormalizeNoteLines
+   -> Firestore RunTransaction
+      -> SubjectProfileQueryService.WithTx(...).GetSubjectProfileByID
+      -> SubjectProfileCommandService.WithTx(...).SaveSubjectProfile / DeleteSubjectProfile
 ```
 
-狀態轉換表：
+保存 tags call chain：
 
-| 原始 link.status | 視角 | 輸出 status | direction |
-| --- | --- | --- | --- |
-| pending | requester | pending_sent | outgoing |
-| pending | target | pending_received | incoming |
-| active | 任意 | active | none |
-| rejected | 任意 | rejected | none |
-| blocked | 任意 | blocked | none |
+```text
+PUT /citrus/profiles/tags
+-> VerifyToken middleware
+-> ProfileHandler.SaveSubjectTags
+-> ProfileCommandUseCase.SaveSubjectTags
+   -> EnsureAccessibleSubject
+      -> LinkQueryUseCase.GetLinkedSubject
+   -> TagCatalogQueryService.GetActiveTagCatalog
+   -> ProfileValidator.ValidateAndNormalizeSelectedTags
+   -> Firestore RunTransaction
+      -> SubjectProfileQueryService.WithTx(...).GetSubjectProfileByID
+      -> SubjectProfileCommandService.WithTx(...).SaveSubjectProfile / DeleteSubjectProfile
+```
 
-filter 規則：
+access rule：
 
-| filter | 保留項目 |
-| --- | --- |
-| active | active |
-| received | pending_received |
-| sent | pending_sent |
-| all 或空字串 | 除 blocked 外都保留 |
+```text
+EnsureAccessibleSubject
+│
+├─ ownerID 不可空                line 19
+├─ subjectId 不可空              line 22
+├─ ownerID != subjectId          line 25
+├─ GetLinkedSubject(...)         line 29
+└─ subject == nil -> 回錯        line 33
+```
 
-排序規則：
+notes 驗證規則：
 
-| 順序 | 規則 |
-| --- | --- |
-| 1 | 狀態權重：active -> pending_received -> pending_sent -> rejected |
-| 2 | 同權重時，DisplayName 開頭 ASCII 優先 |
-| 3 | 再同類型時，直接比較 DisplayName 字串 |
+```text
+NormalizeNoteLines
+│
+├─ trim 每條                     line 32
+├─ 空字串直接移除                line 33
+├─ 單條 > 60 字 -> 回錯          line 37
+└─ 非空短句 > 3 條 -> 回錯       line 44
+```
 
-目前實作限制：
+tags 驗證規則：
 
-- FindByIDs 會批次查 link_users，但不檢查 is_active。
-- DeleteUser 只把 link_user 標 inactive，不會清理 links。
-- 兩者相加後，inactive 使用者仍可能出現在列表。
+```text
+ValidateAndNormalizeSelectedTags
+│
+├─ normalize groupKey/tagKey     line 71
+├─ groupKey / tagKey 不可空      line 74
+├─ group 必須存在                line 78
+├─ tag 必須存在且 active         line 83
+├─ dedupe 相同 group__tag        line 88
+└─ single group 只能選一個       line 92
+```
 
-### 5. 測試資料與成熟度
+資料 merge / delete 規則：
+
+```text
+SaveSubjectNotes
+│
+├─ RunTransaction                line 127
+├─ transaction 內讀既有 profile  line 58
+├─ 保留既有 selectedTags         line 63
+├─ notes + tags 都空 -> delete   line 68
+└─ 否則 build + save             line 75
+
+SaveSubjectTags
+│
+├─ RunTransaction                line 127
+├─ transaction 內讀既有 profile  line 98
+├─ 保留既有 noteLines            line 103
+├─ notes + tags 都空 -> delete   line 108
+└─ 否則 build + save             line 115
+```
+
+Profile API 錯誤映射：
+
+| API | 條件 | HTTP status |
+| --- | --- | --- |
+| PUT /profiles/notes | JSON binding 失敗 | 400 |
+| PUT /profiles/notes | owner 缺失 | 401 |
+| PUT /profiles/notes | subject 非 active linked user | 403 |
+| PUT /profiles/notes | 超過 3 條或單條超長 | 400 |
+| PUT /profiles/notes | Firestore / service unexpected error | 500 |
+| PUT /profiles/tags | JSON binding 失敗 | 400 |
+| PUT /profiles/tags | owner 缺失 | 401 |
+| PUT /profiles/tags | subject 非 active linked user | 403 |
+| PUT /profiles/tags | group / tag 不存在或 inactive | 400 |
+| PUT /profiles/tags | single-select 衝突 | 400 |
+| PUT /profiles/tags | Firestore / service unexpected error | 500 |
+
+### 5. 人物背景資料與 tag catalog 查詢
 
 關鍵檔案
 
-- internal/auth/seeder/auth_seeder.go (line 29)
-- internal/link/seeder/link_seeder.go (line 35)
-- go.mod (line 1)
+- internal/profile/handler/profile_handler.go (line 84)
+- internal/profile/usecase/query/profile_usecase.go (line 23)
+- internal/profile/usecase/common.go (line 65)
+- internal/profile/repository/tag_catalog_repository.go (line 44)
 
-Seeder 流程：
+查 profile context call chain：
 
 ```text
-AuthSeeder.Seed
-│
-├─ Register(admin@linkchat.com, admin123, System Admin)
-├─ Register(user@linkchat.com, user123, Normal User)
-└─ Register(evan01203394@gmail.com, evan, EvanHe)
-
-LinkSeeder.Seed
-│
-├─ SearchUsers("Normal User")
-├─ SearchUsers("EvanHe")
-└─ ApplyLink(Normal User -> EvanHe)
+GET /citrus/profiles/context
+-> VerifyToken middleware
+-> ProfileHandler.GetSubjectProfileContext
+-> ProfileQueryUseCase.GetSubjectProfileContext
+   -> EnsureAccessibleSubject
+      -> LinkQueryUseCase.GetLinkedSubject
+   -> SubjectProfileQueryService.GetSubjectProfileByID
+   -> ToSubjectProfileResponse
 ```
 
-成熟度判斷：
+查 tag catalog call chain：
 
-- 有 compile-level 可用的程式結構，但沒有自動化測試檔。
-- 主要驗證方式是 seed 與手動打 API。
-- 秘密值與啟動模式仍是硬編碼。
-- 文件中的 AI 方向尚未體現在目前目錄的程式碼。
+```text
+GET /citrus/profiles/tag-catalog
+-> VerifyToken middleware
+-> ProfileHandler.GetTagCatalog
+-> ProfileQueryUseCase.GetTagCatalog
+   -> TagCatalogQueryService.GetActiveTagCatalog
+      -> TagCatalogRepository.ListActiveGroups
+      -> TagCatalogRepository.ListActiveTags
+```
+
+response shaping 補充：
+
+```text
+ToSubjectProfileResponse
+│
+├─ profile == nil -> 回空 noteLines / selectedTags   line 72
+├─ 有 notes 就照原順序 append                       line 76
+├─ 有 tags 就轉成 response item                     line 80
+└─ updatedAt 只有 profile 存在時才會帶             line 90
+```
+
+catalog repository 補充：
+
+```text
+ListActiveGroups
+├─ 只查 active=true                                  line 45
+└─ 依 orderNo / groupKey 排序                        line 65
+
+ListActiveTags
+├─ 只查 active=true                                  line 76
+└─ 依 groupKey / orderNo / tagKey 排序              line 96
+```
+
+Profile query API 錯誤映射：
+
+| API | 條件 | HTTP status |
+| --- | --- | --- |
+| GET /profiles/context | owner 缺失 | 401 |
+| GET /profiles/context | subjectId 空白 | 400 |
+| GET /profiles/context | subject 非 active linked user | 403 |
+| GET /profiles/context | 沒有 profile 文件 | 200 |
+| GET /profiles/context | query / repository unexpected error | 500 |
+| GET /profiles/tag-catalog | repository / query service error | 500 |
+
+### 6. 資料模型與持久化
+
+關鍵檔案
+
+- internal/auth/model/user.go (line 5)
+- internal/link/model/link_user.go (line 5)
+- internal/link/model/link.go (line 13)
+- internal/profile/model/subject_profile.go (line 5)
+- internal/profile/model/tag_catalog.go (line 3)
+
+users：
+
+| 欄位 | 型別 | 用途 |
+| --- | --- | --- |
+| id | string | 主鍵 |
+| email | string | 登入帳號 |
+| password | string | bcrypt hash |
+| display_name | string | 顯示名稱 |
+| role | string | user / vip / admin |
+| created_at | time | 建立時間 |
+| is_active | bool | 軟刪除狀態 |
+
+link_users：
+
+| 欄位 | 型別 | 用途 |
+| --- | --- | --- |
+| id | string | 對應 auth user id |
+| display_name | string | 搜尋與列表顯示 |
+| updated_at | time | 最近更新時間 |
+| is_active | bool | 是否可被搜尋與申請 |
+
+links：
+
+| 欄位 | 型別 | 用途 |
+| --- | --- | --- |
+| id | string | 主鍵 |
+| requester_id | string | 發起申請者 |
+| target_id | string | 被申請者 |
+| participants | []string | 用於 array-contains 查詢 |
+| status | string | pending / active / rejected / blocked |
+| created_at | time | 建立時間 |
+| updated_at | time | 更新時間 |
+
+subject_profiles：
+
+| 欄位 | 型別 | 用途 |
+| --- | --- | --- |
+| id | string | ownerID__subjectID 主鍵 |
+| owner_id | string | 維護這份資料的使用者 |
+| subject_id | string | 被維護的對象 |
+| note_lines | []string | 最多三條補充短句 |
+| selected_tags | []object | canonical groupKey/tagKey |
+| updated_at | time | 最近更新時間 |
+
+profile_tag_groups：
+
+| 欄位 | 型別 | 用途 |
+| --- | --- | --- |
+| group_key | string | 穩定 group key |
+| label | string | LinkChat UI 顯示名稱 |
+| selection_mode | string | single / multi |
+| active | bool | 是否可被選用 |
+| order_no | int | UI 排序 |
+
+profile_tags：
+
+| 欄位 | 型別 | 用途 |
+| --- | --- | --- |
+| id | string | groupKey__tagKey 主鍵 |
+| group_key | string | 所屬 group |
+| tag_key | string | 穩定 tag key |
+| label | string | LinkChat UI 顯示名稱 |
+| active | bool | 是否可被選用 |
+| order_no | int | UI 排序 |
+
+目前持久化設計補充：
+
+- subject_profiles 用單文件保存 notes + tags，避免跨 collection merge。
+- subject profile 的 label 不會和 tags 一起存，主要持久化的是 canonical key。
+- tag catalog 目前由 seeder 植入，不是從 UI 動態管理。
+
+### 7. Seeder 與測試成熟度
+
+關鍵檔案
+
+- internal/auth/seeder/auth_seeder.go (line 16)
+- internal/link/seeder/link_seeder.go (line 16)
+- internal/profile/seeder/profile_seeder.go (line 11)
+- internal/profile/service/validator/profile_validator_test.go (line 10)
+- internal/profile/usecase/command/profile_usecase_test.go (line 17)
+
+ProfileSeeder 植入內容：
+
+```text
+profile_tag_groups
+├─ role
+├─ communication_style
+└─ support_need
+
+profile_tags
+├─ role__student
+├─ role__coworker
+├─ role__family
+├─ communication_style__slow_warmup
+├─ communication_style__direct
+├─ communication_style__step_by_step
+├─ support_need__reassurance
+└─ support_need__space_first
+```
+
+目前已存在的測試檔：
+
+- internal/profile/service/validator/profile_validator_test.go
+- internal/profile/usecase/command/profile_usecase_test.go
+
+目前測到的場景：
+
+- note normalization
+- note limit rejection
+- tag normalization
+- tag dedupe
+- single-select conflict
+- SaveSubjectNotes 會保留既有 tags
+- SaveSubjectTags 在空資料時會刪 profile
+- inaccessible subject 會被拒絕
+
+目前成熟度結論：
+
+- auth / link 多數仍以手動驗證與 seeder 為主
+- profile 已開始有 deterministic rule 的 unit test
+- handler、repository、整體 integration flow 仍缺自動化測試
+
+## 結語
+
+這份 LinkChat Go backend 現在最準確的理解，不再是「只有 auth/link 的底座」，而是「已把人物背景資料也收進來，但還沒把 AI 入口接上」。
+
+也就是說：
+
+- 資料入口已經比以前完整
+- 邊界比以前清楚
+- 但真正的 LinkChat -> InternalAICopliot flow 仍然還不在 runtime
+
+如果之後要再往 AI 功能推進，最合理的下一步不是回頭重做 profile，而是補上 copilot integration 與跨 repo request contract。
